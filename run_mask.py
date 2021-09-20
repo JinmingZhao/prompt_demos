@@ -8,31 +8,33 @@ https://huggingface.co/models?filter=masked-lm
 
 use self-dataset class
 """
-import logging
-import math
 import os
 import sys
+import numpy as np
 from dataclasses import dataclass, field
 import torch.utils.data as data
 from typing import Optional
 import torch
 import transformers
 from transformers import (
+    AdamW,
     CONFIG_MAPPING,
     MODEL_FOR_MASKED_LM_MAPPING,
     AutoConfig,
     AutoModelForMaskedLM,
     AutoTokenizer,
-    DataCollatorForLanguageModeling,
     HfArgumentParser,
-    Trainer,
     TrainingArguments,
+    get_scheduler,
     set_seed,
 )
+from transformers.models.auto.tokenization_auto import logger
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data.dataloader import DataLoader
+from sklearn.metrics import accuracy_score, recall_score, f1_score, confusion_matrix
+from logger import get_logger
 
-logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
@@ -77,6 +79,14 @@ class ModelArguments:
             "with private models)."
         },
     )
+    per_device_batch_size: Optional[int] = field(
+        default=32,
+        metadata={
+            "help": 'batchsize'
+        },
+    )
+    # num_train_epochs: Optional[int] = field(default=6, metadata={"help": 'max training epochs'},)
+    # weight_decay: Optional[float] = field(default=0.0001, metadata={"help": 'weight_decay'},)
 
 @dataclass
 class DataTrainingArguments:
@@ -162,11 +172,14 @@ class SelfPrompt_dataset(data.Dataset):
         super().__init__()
         self.tokenizer = tokenizer
         self.instances = read_csv(text_filetpath, delimiter=',', skip_rows=1)
-        self.len = len(self.instances)
         self.cls_ = 101
         self.sep_ = 102
         self.mask_ = 103
         self.unk_  = 100
+        self._label_pad = -100 
+
+    def __len__(self):
+        return len(self.instances)
 
     def bert_tokenize(self, text):
         ids = []
@@ -180,28 +193,35 @@ class SelfPrompt_dataset(data.Dataset):
         Return:
         - input_ids    : (L, ), i.e., [cls, wd, wd, ..., sep], 0s padded
         - attn_masks   : (L, ), ie., [1, 1, 1, 1, 0, 0]
-        - txt_labels   : (L, ), [-1, -1, wid, -1, -1, -1]
+        - txt_labels   : (L, ), [-100, -100, wid, -100]
         """
         label_name, text = self.instances[index]
         input_ids = self.bert_tokenize(text)
         target_id = self.bert_tokenize(label_name)
+        # print(text, input_ids)
+        # print(label_name, target_id)
         assert len(target_id) == 1
         # text input, get tokenized  
         input_ids, txt_labels = self.create_mlm_io(input_ids, target_id[0])
         attn_masks = torch.ones(len(input_ids), dtype=torch.long)
-        return input_ids, attn_masks, txt_labels
+        example = {}
+        example['input_ids'] = input_ids
+        example['attn_masks'] = attn_masks
+        example['txt_labels'] = txt_labels
+        return example
 
-    def create_mlm_io(self, target_id, input_ids):
+    def create_mlm_io(self, input_ids, target_id):
         txt_labels = []
         for input_id in input_ids:
             if input_id == self.mask_:
                 txt_labels.append(target_id)
             else:
-                txt_labels.append(-1)
+                txt_labels.append(self._label_pad)
         input_ids = torch.tensor([self.cls_]
                                  + input_ids
-                                 + [self.sep_])
-        txt_labels = torch.tensor([-1] + txt_labels + [-1])
+                                 + [self.sep_], dtype=torch.long)
+        txt_labels = torch.tensor([self._label_pad] + txt_labels + [self._label_pad], dtype=torch.long)
+        assert len(input_ids) == len(txt_labels)
         return input_ids, txt_labels
 
 def mlm_collate(inputs):
@@ -214,17 +234,19 @@ def mlm_collate(inputs):
     :attn_masks   (n, max_{L + num_bb}) padded with 0
     :txt_labels   (n, max_L) padded with -1
     """
-    (input_ids, attn_masks, txt_labels) = inputs
-    input_ids = pad_sequence(input_ids, batch_first=True, padding_value=0)
-    txt_labels = pad_sequence(txt_labels, batch_first=True, padding_value=-1)
-    # padded input_ids.size(1) is max-len
-    position_ids = torch.arange(0, input_ids.size(1), dtype=torch.long).unsqueeze(0)
-    attn_masks = pad_sequence(attn_masks, batch_first=True, padding_value=0)
-
+    _label_pad = -100
+    input_ids = [sample['input_ids'] for sample in inputs]
+    attn_masks = [sample['attn_masks'] for sample in inputs]
+    txt_labels = [sample['txt_labels'] for sample in inputs]
+    input_ids = pad_sequence(input_ids, batch_first=True, padding_value=0).to(device)
+    # 文档里要求是-100 https://huggingface.co/transformers/model_doc/bert.html#transformers.models.bert.modeling_bert.BertForMaskedLM
+    txt_labels = pad_sequence(txt_labels, batch_first=True, padding_value=_label_pad).to(device)
+    attn_masks = pad_sequence(attn_masks, batch_first=True, padding_value=0).to(device)
+    position_ids = torch.arange(0, input_ids.size(1), dtype=torch.long).unsqueeze(0).to(device)
     batch = {'input_ids': input_ids,
              'position_ids': position_ids,
-             'attn_masks': attn_masks,
-             'txt_labels': txt_labels}
+             'attention_mask': attn_masks,
+             'labels': txt_labels}
     return batch
 
 def main():
@@ -233,98 +255,125 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    log_dir = os.path.join(training_args.output_dir, 'log')
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    logger = get_logger(log_dir, suffix='none')
 
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-    logger.setLevel(logging.INFO if is_main_process(training_args.local_rank) else logging.WARN)
-
-    # Log on each process the small summary:
-    logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
-        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
-    )
-    if is_main_process(training_args.local_rank):
-        transformers.utils.logging.set_verbosity_info()
-        transformers.utils.logging.enable_default_handler()
-        transformers.utils.logging.enable_explicit_format()
     logger.info("Training/evaluation parameters %s", training_args)
-
     # Set seed before initializing model.
     set_seed(training_args.seed)   
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
+    print(tokenizer.vocab_size)
 
-    print(data_args.train_file)
-    print(data_args.validation_file)
+    logger.info("Training/evaluation dataloader %s", training_args)
     train_dataset = SelfPrompt_dataset(data_args.train_file, tokenizer)
     val_dataset = SelfPrompt_dataset(data_args.validation_file, tokenizer)
+    train_dataloader = DataLoader(train_dataset, shuffle=True, collate_fn=mlm_collate, batch_size= model_args.per_device_batch_size)
+    eval_dataloader = DataLoader(val_dataset, collate_fn=mlm_collate, batch_size=model_args.per_device_batch_size)
 
-    config_kwargs = {
-        "cache_dir": model_args.cache_dir,
-        "revision": model_args.model_revision,
-        "use_auth_token": True if model_args.use_auth_token else None,
-    }
-    if model_args.config_name:
-        config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
-    elif model_args.model_name_or_path:
-        config = AutoConfig.from_pretrained(model_args.model_name_or_path, **config_kwargs)
-    else:
-        config = CONFIG_MAPPING[model_args.model_type]()
-        logger.warning("You are instantiating a new config instance from scratch.")
-
-    if model_args.model_name_or_path:
-        model = AutoModelForMaskedLM.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
-    else:
-        logger.info("Training new model from scratch")
-        model = AutoModelForMaskedLM.from_config(config)
-
-    # model.resize_token_embeddings(len(tokenizer))
-
-    # Initialize our Trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=val_dataset if training_args.do_eval else None,
-        tokenizer=tokenizer,
-        data_collator=mlm_collate,
+    logger.info("Modeling %s", training_args)
+    config = AutoConfig.from_pretrained(model_args.model_name_or_path)
+    model = AutoModelForMaskedLM.from_pretrained(
+        model_args.model_name_or_path,
+        from_tf=bool(".ckpt" in model_args.model_name_or_path),
+        config=config)
+    model.to(device)
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "weight_decay": training_args.weight_decay,
+        },
+        {
+            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+    ]
+    optimizer = AdamW(optimizer_grouped_parameters, lr=2e-5)
+    max_train_steps = int(training_args.num_train_epochs * len(train_dataset) / model_args.per_device_batch_size)
+    lr_scheduler = get_scheduler(
+            name='linear',
+            optimizer=optimizer,
+            num_warmup_steps=0,
+            num_training_steps=max_train_steps,
     )
+    # Train!
+    logger.info("***** Running training *****")
+    logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num Epochs = {training_args.num_train_epochs}")
+    logger.info(f"  Instantaneous batch size per device = {model_args.per_device_batch_size}")
+    logger.info(f"  Num steps = {max_train_steps}")
+    # Only show the progress bar once on each machine.
+    select_metrix = 'uar'
+    best_eval_metrix = 0
+    best_eval_epoch = -1
+    for epoch in range(int(training_args.num_train_epochs)):
+        lr = optimizer.state_dict()['param_groups'][0]['lr']
+        logger.info(f'\t[LR] current {epoch} learning rate {lr}')
+        model.train()
+        # https://huggingface.co/transformers/_modules/transformers/models/bert/modeling_bert.html#BertForMaskedLM
+        for step, batch in enumerate(train_dataloader):
+            outputs = model(**batch)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+        # evaluation at every epoch
+        model.eval()
+        logger.info('[Evaluation]  on validation')
+        eval_results = evaluation(model, eval_dataloader)
+        logger.info('\t Epoch {}: {}'.format(epoch, eval_results))
+        # choose the best epoch
+        if eval_results[select_metrix] > best_eval_metrix:
+            best_eval_epoch = epoch
+            best_eval_metrix = eval_results[select_metrix]
+            # 保存为 Hugging-face 的格式
+            model.save_pretrained(training_args.output_dir)
+            tokenizer.save_pretrained(training_args.output_dir)
 
-    # Training
-    if training_args.do_train:
-        train_result = trainer.train(resume_from_checkpoint=model_args.model_name_or_path)
-        trainer.save_model()  # Saves the tokenizer too for easy upload
-        metrics = train_result.metrics
-        max_train_samples = (
-            data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
-        )
-        metrics["train_samples"] = min(max_train_samples, len(train_dataset))
+    # print best eval result and clean the other models
+    logger.info('Loading best model found on val set: epoch-%d' % best_eval_epoch)
+    model = AutoModelForMaskedLM.from_pretrained(
+                training_args.output_dir,
+                config=config)    
+    model.to(device)
+    model.eval()
+    logger.info('[Final Evaluation]  on validation')
+    eval_results = evaluation(model, eval_dataloader)
+    logger.info('Epoch {}: {}'.format(best_eval_epoch, eval_results))
 
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
-        trainer.save_state()
+def compute_metrics(preds, label_ids):
+    assert len(preds) == len(label_ids)
+    acc = accuracy_score(label_ids, preds)
+    uar = recall_score(label_ids, preds, average='macro')
+    wf1 = f1_score(label_ids, preds, average='weighted')
+    uwf1 = f1_score(label_ids, preds, average='macro')
+    cm = confusion_matrix(label_ids, preds)
+    return {'total':len(preds), "acc": acc, "uar": uar, "wf1": wf1, 'uwf1': uwf1, 'cm': cm}
 
-    # Evaluation
-    if training_args.do_eval:
-        logger.info("*** Evaluate ***")
-        metrics = trainer.evaluate()
-        max_val_samples = data_args.max_val_samples if data_args.max_val_samples is not None else len(val_dataset)
-        metrics["eval_samples"] = min(max_val_samples, len(val_dataset))
-        perplexity = math.exp(metrics["eval_loss"])
-        metrics["perplexity"] = perplexity
-
-        trainer.log_metrics("eval", metrics)
-        trainer.save_metrics("eval", metrics)
+def evaluation(model, set_dataloader, return_pred=False):
+    total_preds = []
+    total_labels = []
+    for step, batch in enumerate(set_dataloader):
+        outputs = model(**batch)
+        scores = outputs.logits
+        labels = batch['labels']
+        scores = scores.view(-1, model.config.vocab_size)
+        labels = labels.view(-1)
+        scores = scores[labels != -100]
+        labels = labels[labels != -100].detach().cpu().numpy()
+        # print(scores.shape, labels.shape)
+        temp_preds = scores.argmax(axis=1).detach().cpu().numpy()
+        total_preds.append(temp_preds)
+        total_labels.append(labels)
+    total_preds = np.concatenate(total_preds)
+    total_labels = np.concatenate(total_labels)
+    # set early stop and save the best models
+    eval_metric = compute_metrics(total_preds, total_labels)
+    return eval_metric
 
 if __name__ == "__main__":
+    device = torch.device("cuda:{}".format(0))
     main()
