@@ -347,7 +347,7 @@ def main():
     output_tsv = os.path.join(training_args.output_dir, 'result.csv')
     if not os.path.exists(output_tsv):
         open(output_tsv, 'w').close()  # touch output_csv
-    cvNo = int(training_args.output_dir.split('/')[-2])
+    cvNo = int(training_args.output_dir.split('/')[-1])
     write_result_to_tsv(output_tsv, eval_results, cvNo)
 
 def write_result_to_tsv(file_path, tst_log, cvNo):

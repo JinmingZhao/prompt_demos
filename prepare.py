@@ -1,5 +1,6 @@
 import os
 import csv
+from re import template
 
 def read_csv(filepath, delimiter, skip_rows=0):
     '''
@@ -22,9 +23,8 @@ def write_csv(filepath, data, delimiter):
         csv_writer = csv.writer(f, delimiter=delimiter)
         csv_writer.writerows(data)
 
-def get_mask_itwas_template(bert_data_filepath, output_data_filepath):
+def get_mask_template(bert_data_filepath, output_data_filepath, temp):
     label_map = {0: 'anger', 1: 'happy', 2:'neutral', 3:'sad'}
-    temp = ' It was [MASK].'
     new_instances = []
     instances = read_csv(bert_data_filepath, delimiter=',', skip_rows=1)
     new_instances.append(instances[0])
@@ -42,6 +42,7 @@ if __name__ == '__main__':
     set_name = 'tst'
     for cv_no in range(1, 11):
         bert_data_filepath = '/data7/emobert/exp/evaluation/IEMOCAP/bert_data/{}/{}.csv'.format(cv_no, set_name)
-        output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_itwas.csv'.format(cv_no, set_name)
-        # output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_iam.csv'.format(cv_no, set_name)
-        get_mask_itwas_template(bert_data_filepath, output_data_filepath)
+        # output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_itwas.csv'.format(cv_no, set_name)
+        # get_mask_template(bert_data_filepath, output_data_filepath, template=' It was [Mask].')
+        output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_iam.csv'.format(cv_no, set_name)
+        get_mask_template(bert_data_filepath, output_data_filepath, temp=' I am [MASK].')
