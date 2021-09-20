@@ -6,7 +6,13 @@ Fine-tuning the library models for masked language modeling (BERT, ALBERT, RoBER
 Here is the full list of checkpoints on the hub that can be fine-tuned by this script:
 https://huggingface.co/models?filter=masked-lm
 
-use self-dataset class
+https://huggingface.co/transformers/_modules/transformers/models/bert/modeling_bert.html#BertForNextSentencePrediction
+use self-dataset class for Next Sentence Prediction
+one sentence Vs 4 emotions
+i love this movie [SEP] It was happy
+i love this movie [SEP] It was neutral
+i love this movie [SEP] It was sad
+i love this movie [SEP] It was anger
 """
 import os
 import sys
@@ -22,7 +28,7 @@ from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_MASKED_LM_MAPPING,
     AutoConfig,
-    AutoModelForMaskedLM,
+    BertForNextSentencePrediction,
     AutoTokenizer,
     HfArgumentParser,
     TrainingArguments,
@@ -35,6 +41,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data.dataloader import DataLoader
 from sklearn.metrics import accuracy_score, recall_score, f1_score, confusion_matrix
 from logger import get_logger
+
 
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
@@ -182,72 +189,64 @@ class SelfPrompt_dataset(data.Dataset):
     def __len__(self):
         return len(self.instances)
 
-    def bert_tokenize(self, text):
-        ids = []
-        for word in text.strip().split():
-            ws = self.tokenizer.tokenize(word)
-            ids.extend(self.tokenizer.convert_tokens_to_ids(ws))
-        return ids
-
     def __getitem__(self, index):
         """
         Return:
-        - input_ids    : (L, ), i.e., [cls, wd, wd, ..., sep], 0s padded
+        - input_ids    : (L, ), i.e., [cls, wd, wd, ..., sep, wd, wd, wd, wd], 0s padded
         - attn_masks   : (L, ), ie., [1, 1, 1, 1, 0, 0]
-        - txt_labels   : (L, ), [-100, -100, wid, -100]
+        - labels   : 有点奇怪
+            - 0 indicates sequence B is a continuation of sequence A,
+            - 1 indicates sequence B is a random sequence.
         """
-        label_name, text = self.instances[index]
-        input_ids = self.bert_tokenize(text)
-        target_id = self.bert_tokenize(label_name)
-        # print(text, input_ids)
-        # print(label_name, target_id)
-        assert len(target_id) == 1
+        target, text1, text2 = self.instances[index]
+        encode = self.tokenizer(text1, text2, return_tensors='pt')
+        if int(target) == 0:
+            target = 1
+        else:
+            target = 0
         # text input, get tokenized  
-        input_ids, txt_labels = self.create_mlm_io(input_ids, target_id[0])
-        attn_masks = torch.ones(len(input_ids), dtype=torch.long)
         example = {}
-        example['input_ids'] = input_ids
-        example['attn_masks'] = attn_masks
-        example['txt_labels'] = txt_labels
+        example['label'] = torch.tensor(target, dtype=torch.long)
+        example['input_ids'] =  encode['input_ids'][0]
+        example['token_type_ids'] = encode['token_type_ids'][0]
+        example['attention_mask'] = encode['attention_mask'][0]
+        # print(text1, text2)
+        # print(example['input_ids'])
         return example
 
-    def create_mlm_io(self, input_ids, target_id):
-        txt_labels = []
-        for input_id in input_ids:
-            if input_id == self.mask_:
-                txt_labels.append(target_id)
+def bert_id2token(tokenizer, batch_ids):
+    batch_texts = []
+    for ids in batch_ids:
+        tokens = tokenizer.convert_ids_to_tokens(ids)
+        new_tokens = []
+        for token in tokens:
+            if token == '[PAD]':
+                continue
             else:
-                txt_labels.append(self._label_pad)
-        input_ids = torch.tensor([self.cls_]
-                                 + input_ids
-                                 + [self.sep_], dtype=torch.long)
-        txt_labels = torch.tensor([self._label_pad] + txt_labels + [self._label_pad], dtype=torch.long)
-        assert len(input_ids) == len(txt_labels)
-        return input_ids, txt_labels
+                new_tokens.append(token)
+        batch_texts.append(' '.join(new_tokens))
+    return batch_texts
 
-def mlm_collate(inputs):
+def nsp_collate(inputs):
     """
     Jinming: modify to img_position_ids
     Return:
-    :input_ids    (n, max_L) padded with 0
-    :position_ids (n, max_L) padded with 0
-    :txt_lens     list of [txt_len]
-    :attn_masks   (n, max_{L + num_bb}) padded with 0
-    :txt_labels   (n, max_L) padded with -1
     """
-    _label_pad = -100
+    labels = [sample['label'] for sample in inputs]
     input_ids = [sample['input_ids'] for sample in inputs]
-    attn_masks = [sample['attn_masks'] for sample in inputs]
-    txt_labels = [sample['txt_labels'] for sample in inputs]
+    attention_masks = [sample['attention_mask'] for sample in inputs]
+    token_type_ids = [sample['token_type_ids'] for sample in inputs]
     input_ids = pad_sequence(input_ids, batch_first=True, padding_value=0).to(device)
-    # 文档里要求是-100 https://huggingface.co/transformers/model_doc/bert.html#transformers.models.bert.modeling_bert.BertForMaskedLM
-    txt_labels = pad_sequence(txt_labels, batch_first=True, padding_value=_label_pad).to(device)
-    attn_masks = pad_sequence(attn_masks, batch_first=True, padding_value=0).to(device)
+    token_type_ids = pad_sequence(token_type_ids, batch_first=True, padding_value=1).to(device)
+    attn_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0).to(device)
     position_ids = torch.arange(0, input_ids.size(1), dtype=torch.long).unsqueeze(0).to(device)
+    labels = torch.tensor(labels, dtype=torch.long).to(device)
     batch = {'input_ids': input_ids,
              'position_ids': position_ids,
+             'token_type_ids': token_type_ids,
              'attention_mask': attn_masks,
-             'labels': txt_labels}
+             'labels': labels
+             }
     return batch
 
 def main():
@@ -270,12 +269,12 @@ def main():
     logger.info("Training/evaluation dataloader %s", training_args)
     train_dataset = SelfPrompt_dataset(data_args.train_file, tokenizer)
     val_dataset = SelfPrompt_dataset(data_args.validation_file, tokenizer)
-    train_dataloader = DataLoader(train_dataset, shuffle=True, collate_fn=mlm_collate, batch_size= model_args.per_device_batch_size)
-    eval_dataloader = DataLoader(val_dataset, collate_fn=mlm_collate, batch_size=model_args.per_device_batch_size)
+    train_dataloader = DataLoader(train_dataset, shuffle=True, collate_fn=nsp_collate, batch_size= model_args.per_device_batch_size)
+    eval_dataloader = DataLoader(val_dataset, collate_fn=nsp_collate, batch_size=model_args.per_device_batch_size)
 
     logger.info("Modeling %s", training_args)
     config = AutoConfig.from_pretrained(model_args.model_name_or_path)
-    model = AutoModelForMaskedLM.from_pretrained(
+    model = BertForNextSentencePrediction.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config)
@@ -324,7 +323,8 @@ def main():
         # evaluation at every epoch
         model.eval()
         logger.info('[Evaluation]  on validation')
-        eval_results = evaluation(model, eval_dataloader)
+        nsp_eval_results, eval_results = evaluation(model, eval_dataloader, tokenizer)
+        logger.info('\t Epoch NSP {}: {}'.format(epoch, nsp_eval_results))
         logger.info('\t Epoch {}: {}'.format(epoch, eval_results))
         # choose the best epoch
         if eval_results[select_metrix] > best_eval_metrix:
@@ -336,13 +336,14 @@ def main():
 
     # print best eval result and clean the other models
     logger.info('Loading best model found on val set: epoch-%d' % best_eval_epoch)
-    model = AutoModelForMaskedLM.from_pretrained(
+    model = BertForNextSentencePrediction.from_pretrained(
                 training_args.output_dir,
                 config=config)    
     model.to(device)
     model.eval()
     logger.info('[Final Evaluation]  on validation')
-    eval_results = evaluation(model, eval_dataloader)
+    output_path = os.path.join(training_args.output_dir, 'details.csv')
+    nsp_eval_results, eval_results = evaluation(model, eval_dataloader, tokenizer, output_path)
     logger.info('Epoch {}: {}'.format(best_eval_epoch, eval_results))
     output_tsv = os.path.join(os.path.split(training_args.output_dir)[0], 'result.csv')
     if not os.path.exists(output_tsv):
@@ -372,26 +373,76 @@ def compute_metrics(preds, label_ids):
     cm = confusion_matrix(label_ids, preds)
     return {'total':len(preds), "wa": acc, "uar": uar, "wf1": wf1, 'uwf1': uwf1, 'cm': cm}
 
-def evaluation(model, set_dataloader):
+def write_csv(filepath, data, delimiter):
+    '''
+    TSV is Tab-separated values and CSV, Comma-separated values
+    :param data, is list
+    '''
+    import csv
+    with open(filepath, 'w', encoding='utf-8') as f:
+        csv_writer = csv.writer(f, delimiter=delimiter)
+        csv_writer.writerows(data)
+
+def compute_argmax_metrics(total_scores, total_labels, total_texts, output_path):
+    # 每四个是一组, 将每个样本属于‘是’的概率拿出来，4个类别候选中取概率最大的作为最终的判别
+    all_instances = []
     total_preds = []
+    total_targets = []
+    assert len(total_scores) % 4 == 0
+    print(len(total_scores), len(total_labels), len(total_texts))
+    assert len(total_scores) == len(total_labels) == len(total_texts)
+    for index in range(0, len(total_scores)):
+        all_instances.append([total_texts[index], total_scores[index], total_labels[index]])
+    for index in range(0, len(total_scores), 4):
+        sub_scores = total_scores[index*4 : (index+1)*4]
+        sub_labels = total_labels[index*4 : (index+1)*4]
+        sub_texts = total_texts[index*4 : (index+1)*4]
+        sum_emos = []
+        sum_probs = []
+        if len(sub_scores) == len(sub_labels) == len(sub_texts) == 4:
+            for j in range(len(sub_scores)):
+                emo_name = sub_texts[j].split('[SEP]')[1].split(' ')[3]
+                if sub_labels[j] == 0:
+                    total_targets.append(emo_name)
+                sum_probs.append(sub_scores[j][0])
+                sum_emos.append(emo_name)
+            total_preds.append(sum_emos[np.argmax(sum_probs)])
+    assert len(total_preds) == len(total_targets)
+    total_preds_ids, total_targets_ids = [], []
+    label_map = {'anger':0, 'happy':1, 'neutral':2, 'sad':3}
+    for pred, target in zip(total_preds, total_targets):
+        total_preds_ids.append(label_map[pred])
+        total_targets_ids.append(label_map[target])
+    val_results = compute_metrics(total_preds_ids, total_targets_ids)
+    if output_path is not None:
+        print(output_path)
+        write_csv(output_path, all_instances, delimiter=';')
+    return val_results
+
+def evaluation(model, set_dataloader, tokenizer, output_path=None):
+    # 需要整理一下结果，决定最后的结果
+    total_preds = []
+    total_scores = []
     total_labels = []
+    total_texts = []
     for step, batch in enumerate(set_dataloader):
         outputs = model(**batch)
-        scores = outputs.logits
-        labels = batch['labels']
-        scores = scores.view(-1, model.config.vocab_size)
-        labels = labels.view(-1)
-        scores = scores[labels != -100]
-        labels = labels[labels != -100].detach().cpu().numpy()
-        # print(scores.shape, labels.shape)
+        scores =  torch.softmax(outputs.logits, dim=1)
+        labels = batch['labels'].detach().cpu().numpy()
         temp_preds = scores.argmax(axis=1).detach().cpu().numpy()
         total_preds.append(temp_preds)
         total_labels.append(labels)
+        total_scores.append(scores.detach().cpu().numpy())
+        input_ids = batch['input_ids'].detach().cpu().numpy()
+        batch_texts = bert_id2token(tokenizer, input_ids)
+        total_texts.append(batch_texts)
     total_preds = np.concatenate(total_preds)
     total_labels = np.concatenate(total_labels)
-    # set early stop and save the best models
-    eval_metric = compute_metrics(total_preds, total_labels)
-    return eval_metric
+    total_texts = np.concatenate(total_texts)
+    total_scores = np.concatenate(total_scores)
+    nsp_eval_metric = compute_metrics(total_preds, total_labels)
+    emo_eval_metric = compute_argmax_metrics(total_scores, total_labels, total_texts, output_path)
+    return nsp_eval_metric, emo_eval_metric
 
 if __name__ == "__main__":
     device = torch.device("cuda:{}".format(0))
