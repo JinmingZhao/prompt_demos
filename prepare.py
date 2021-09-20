@@ -39,9 +39,9 @@ def get_mask_itwas_template(bert_data_filepath, output_data_filepath):
     write_csv(output_data_filepath, new_instances, delimiter=',')
 
 if __name__ == '__main__':
-    set_name = 'trn_val'
-    cv_no = 1
-    bert_data_filepath = '/data7/emobert/exp/evaluation/IEMOCAP/bert_data/{}/{}.csv'.format(cv_no, set_name)
-    output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_itwas.csv'.format(cv_no, set_name)
-    # output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_iam.csv'.format(cv_no, set_name)
-    get_mask_itwas_template(bert_data_filepath, output_data_filepath)
+    set_name = 'tst'
+    for cv_no in range(1, 11):
+        bert_data_filepath = '/data7/emobert/exp/evaluation/IEMOCAP/bert_data/{}/{}.csv'.format(cv_no, set_name)
+        output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_itwas.csv'.format(cv_no, set_name)
+        # output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_iam.csv'.format(cv_no, set_name)
+        get_mask_itwas_template(bert_data_filepath, output_data_filepath)

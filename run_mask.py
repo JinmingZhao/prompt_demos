@@ -10,6 +10,7 @@ use self-dataset class
 """
 import os
 import sys
+import fcntl
 import numpy as np
 from dataclasses import dataclass, field
 import torch.utils.data as data
@@ -343,6 +344,24 @@ def main():
     logger.info('[Final Evaluation]  on validation')
     eval_results = evaluation(model, eval_dataloader)
     logger.info('Epoch {}: {}'.format(best_eval_epoch, eval_results))
+    output_tsv = os.path.join(training_args.output_dir, 'result.csv')
+    if not os.path.exists(output_tsv):
+        open(output_tsv, 'w').close()  # touch output_csv
+    cvNo = int(training_args.output_dir.split('/')[-2])
+    write_result_to_tsv(output_tsv, eval_results, cvNo)
+
+def write_result_to_tsv(file_path, tst_log, cvNo):
+    # 使用fcntl对文件加锁,避免多个不同进程同时操作同一个文件
+    f_in = open(file_path)
+    fcntl.flock(f_in.fileno(), fcntl.LOCK_EX) # 加锁
+    content = f_in.readlines()
+    if len(content) != 12:
+        content += ['\n'] * (12-len(content))
+    content[cvNo-1] = 'CV{}\t{:.4f}\t{:.4f}\t{:.4f}\n'.format(cvNo, tst_log['wa'], tst_log['wf1'], tst_log['uar'])
+    f_out = open(file_path, 'w')
+    f_out.writelines(content)
+    f_out.close()
+    f_in.close()     
 
 def compute_metrics(preds, label_ids):
     assert len(preds) == len(label_ids)
@@ -351,9 +370,9 @@ def compute_metrics(preds, label_ids):
     wf1 = f1_score(label_ids, preds, average='weighted')
     uwf1 = f1_score(label_ids, preds, average='macro')
     cm = confusion_matrix(label_ids, preds)
-    return {'total':len(preds), "acc": acc, "uar": uar, "wf1": wf1, 'uwf1': uwf1, 'cm': cm}
+    return {'total':len(preds), "wa": acc, "uar": uar, "wf1": wf1, 'uwf1': uwf1, 'cm': cm}
 
-def evaluation(model, set_dataloader, return_pred=False):
+def evaluation(model, set_dataloader):
     total_preds = []
     total_labels = []
     for step, batch in enumerate(set_dataloader):
