@@ -15,14 +15,13 @@ happy [3407] anger [4963] sad [6517] neutral [8699]
 
 # MSP-IMPROV 
 12-folder Cross-Validation Speaker-Independent(average perfomance)
-
 | Model | UAR    | F1 |
 | :----| :----: | :----:  |
 | Bert-base-uncase + Finetune | 0.6226  | 0.6379  |
-| Bert-base-uncase + prompt(it was)  |  |  |
-| Bert-base-uncase + prompt(i am)  |  |  |
-| Bert-base-uncase + prompt+NSP(it was)  |  |  |
-| Bert-base-uncase + prompt+NSP(i am)  |  |  |
+| Bert-base-uncase + prompt(it was)  | 0.6202 |  0.6274 |
+| Bert-base-uncase + prompt(i am)  | 0.6201 | 0.6239 |
+| Bert-base-uncase + prompt+NSP(it was)  | 0.5966 | 0.6254 |
+| Bert-base-uncase + prompt+NSP(i am)  | 0.5997 | 0.6249 |
 
 # reference
 Pre-train, Prompt, and Predict: A Systematic Survey of Prompting Methods in Natural Language Processing. Penfeng Liu et al. CMU.
