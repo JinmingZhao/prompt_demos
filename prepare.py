@@ -1,6 +1,4 @@
-import os
 import csv
-from re import template
 
 def read_csv(filepath, delimiter, skip_rows=0):
     '''
@@ -47,7 +45,7 @@ def get_nsp_template(bert_data_filepath, output_data_filepath, temp=' I am'):
         label, text = instance
         label_name = label_map[int(label)]
         for label in label_map.values():
-            text2 = temp + ' ' + label + '.'
+            text2 = temp.replace('[MASK]', label)
             if label_name == label:
                 target = 1
             else:
@@ -60,23 +58,25 @@ def get_nsp_template(bert_data_filepath, output_data_filepath, temp=' I am'):
 if __name__ == '__main__':
     set_name = 'trn_val'
     for cv_no in range(1, 13):
+        template = [
+            ' i am [MASK] .',
+            ' it was [MASK] .',
+            " i'm [MASK].",
+            ' overall, it expresses [MASK] emotion .',
+            ' it is [MASK] .',
+            ' [MASK] .',
+            ' [MASK] emotion .',
+        ][6]
+        template_name = template.replace('[MASK]', '').replace('.', '').replace("'", '-').replace(',', '').replace(' ', '')
         #### for iemocap 
         # bert_data_filepath = '/data7/emobert/exp/evaluation/IEMOCAP/bert_data/{}/{}.csv'.format(cv_no, set_name)
-        # output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_itwas.csv'.format(cv_no, set_name)
-        # get_mask_template(bert_data_filepath, output_data_filepath, temp=' It was [MASK].')
-        # output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_iam.csv'.format(cv_no, set_name)
-        # get_mask_template(bert_data_filepath, output_data_filepath, temp=' I am [MASK].')
-        # output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_nsp_iam.csv'.format(cv_no, set_name)
-        # get_nsp_template(bert_data_filepath, output_data_filepath, temp=' I am')
-        # output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_nsp_itwas.csv'.format(cv_no, set_name)
-        # get_nsp_template(bert_data_filepath, output_data_filepath, temp=' It was')
+        # output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_mask_{}.csv'.format(cv_no, set_name, template_name)
+        # get_mask_template(bert_data_filepath, output_data_filepath, temp=template)
+        # output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/iemocap/{}/{}_nsp_{}.csv'.format(cv_no, set_name, template_name)
+        # get_nsp_template(bert_data_filepath, output_data_filepath, temp=template)
         ### for msp
         bert_data_filepath = '/data7/emobert/exp/evaluation/MSP/bert_data/{}/{}.csv'.format(cv_no, set_name)
-        output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/msp/{}/{}_mask_itwas.csv'.format(cv_no, set_name)
-        get_mask_template(bert_data_filepath, output_data_filepath, temp=' It was [MASK].')
-        output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/msp/{}/{}_mask_iam.csv'.format(cv_no, set_name)
-        get_mask_template(bert_data_filepath, output_data_filepath, temp=' I am [MASK].')
-        output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/msp/{}/{}_nsp_iam.csv'.format(cv_no, set_name)
-        get_nsp_template(bert_data_filepath, output_data_filepath, temp=' I am')
-        output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/msp/{}/{}_nsp_itwas.csv'.format(cv_no, set_name)
-        get_nsp_template(bert_data_filepath, output_data_filepath, temp=' It was')
+        output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/msp/{}/{}_mask_{}.csv'.format(cv_no, set_name, template_name)
+        get_mask_template(bert_data_filepath, output_data_filepath, temp=template)
+        output_data_filepath = '/data7/emobert/exp/promote_pretrain/data/msp/{}/{}_nsp_{}.csv'.format(cv_no, set_name, template_name)
+        get_nsp_template(bert_data_filepath, output_data_filepath, temp=template)

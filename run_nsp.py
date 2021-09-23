@@ -385,6 +385,7 @@ def write_csv(filepath, data, delimiter):
 
 def compute_argmax_metrics(total_scores, total_labels, total_texts, output_path):
     # 每四个是一组, 将每个样本属于‘是’的概率拿出来，4个类别候选中取概率最大的作为最终的判别
+    label_map = {'anger':0, 'happy':1, 'neutral':2, 'sad':3}
     all_instances = []
     total_preds = []
     total_targets = []
@@ -401,7 +402,9 @@ def compute_argmax_metrics(total_scores, total_labels, total_texts, output_path)
         sum_probs = []
         if len(sub_scores) == len(sub_labels) == len(sub_texts) == 4:
             for j in range(len(sub_scores)):
-                emo_name = sub_texts[j].split('[SEP]')[1].split(' ')[3]
+                for e_n in label_map.keys():
+                    if e_n in sub_texts[j].split('[SEP]')[1]:
+                        emo_name = e_n
                 if sub_labels[j] == 0:
                     total_targets.append(emo_name)
                 sum_probs.append(sub_scores[j][0])
@@ -409,7 +412,6 @@ def compute_argmax_metrics(total_scores, total_labels, total_texts, output_path)
             total_preds.append(sum_emos[np.argmax(sum_probs)])
     assert len(total_preds) == len(total_targets)
     total_preds_ids, total_targets_ids = [], []
-    label_map = {'anger':0, 'happy':1, 'neutral':2, 'sad':3}
     for pred, target in zip(total_preds, total_targets):
         total_preds_ids.append(label_map[pred])
         total_targets_ids.append(label_map[target])
