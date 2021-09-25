@@ -56,8 +56,8 @@ def get_nsp_template(bert_data_filepath, output_data_filepath, temp=' I am'):
 
 
 if __name__ == '__main__':
-    set_name = 'trn_val'
-    for cv_no in range(1, 13):
+    set_name = 'tst'
+    for cv_no in range(11, 13):
         template = [
             ' i am [MASK] .',
             ' it was [MASK] .',
@@ -66,7 +66,8 @@ if __name__ == '__main__':
             ' it is [MASK] .',
             ' [MASK] .',
             ' [MASK] emotion .',
-        ][6]
+            ' he is [MASK]'
+        ][7]
         template_name = template.replace('[MASK]', '').replace('.', '').replace("'", '-').replace(',', '').replace(' ', '')
         #### for iemocap 
         # bert_data_filepath = '/data7/emobert/exp/evaluation/IEMOCAP/bert_data/{}/{}.csv'.format(cv_no, set_name)
